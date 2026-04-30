@@ -1,0 +1,5 @@
+interval: 5s
+disk_path: "/"
+server_url: "http://localhost:8080"
+node_id: "mac-local-01"
+auth_token: "my-super-secret-token"
