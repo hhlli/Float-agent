@@ -4,7 +4,6 @@ import (
 	"crypto/tls" // 🌟 新增：用于配置 TLS
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -13,7 +12,10 @@ import (
 	"net/http"
 
 	"github.com/gorilla/websocket"
+	"Float-agent/internal/terminal" // 🌟 必须添加这一行
 	"Float-agent/internal/collector"
+	"Float-agent/internal/logger"
+	"go.uber.org/zap"
 )
 
 // ── JSON-RPC 结构 ───────────────────────────────────────
@@ -124,55 +126,80 @@ func (c *WSClient) Connect() error {
 	c.conn = conn
 	c.connMu.Unlock()
 
-	log.Printf("[WS] 已连接到服务端: %s (Insecure: %v)\n", c.serverURL, c.insecure)
+	logger.Log.Info("Connected to server", zap.String("server", c.serverURL), zap.Bool("insecure", c.insecure))
 
 	// 唯一读循环
 	go func() {
-		defer func() {
-			conn.Close()
-			c.connMu.Lock()
-			c.conn = nil
-			c.connMu.Unlock()
+        defer func() {
+            conn.Close()
+            c.connMu.Lock()
+            c.conn = nil
+            c.connMu.Unlock()
 
-			c.pendingMu.Lock()
-			for id, ch := range c.pending {
-				ch <- nil
-				delete(c.pending, id)
-			}
-			c.pendingMu.Unlock()
+            c.pendingMu.Lock()
+            for id, ch := range c.pending {
+                ch <- nil
+                delete(c.pending, id)
+            }
+            c.pendingMu.Unlock()
+            logger.Log.Warn("WebSocket connection lost", zap.String("server", c.serverURL))
+        }()
 
-			log.Println("[WS] 连接断开")
-		}()
+        for {
+            // 🌟 核心修改：使用 map 接收以区分 Request 和 Response
+            var rawMsg map[string]interface{}
+            if err := conn.ReadJSON(&rawMsg); err != nil {
+                return
+            }
 
-		for {
-			var msg rpcResponse
-			if err := conn.ReadJSON(&msg); err != nil {
-				return
-			}
+            // A. 处理服务端主动下发的指令 (Request)
+            if method, ok := rawMsg["method"].(string); ok {
+                switch method {
+                case "tasks.push":
+                    // 兼容处理：将 params 转为 Task 列表
+                    if params, exists := rawMsg["params"]; exists {
+                        var tasks []Task
+                        pBytes, _ := json.Marshal(params)
+                        if err := json.Unmarshal(pBytes, &tasks); err == nil && c.OnTasks != nil {
+                            c.OnTasks(tasks)
+                        }
+                    }
+                case "terminal.request":
+                    // 🌟 新增：处理远程控制请求
+                    if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+                        sessionID, _ := params["session_id"].(string)
+                        if sessionID != "" {
+							logger.Log.Info("Terminal session requested", zap.String("session_id", sessionID))
+							go c.connectTerminalWS(sessionID)
+						}
+                    }
+                }
+                continue // 处理完 Request 直接跳过
+            }
 
-			if msg.Method == "tasks.push" && msg.ID == 0 {
-				var tasks []Task
-				if err := json.Unmarshal(msg.Result, &tasks); err == nil && c.OnTasks != nil {
-					c.OnTasks(tasks)
-				}
-				continue
-			}
+            // B. 处理服务端返回的响应 (Response，对应 Agent 发出的 report 等)
+            // JSON 数字在 map 中默认是 float64
+            if idFloat, ok := rawMsg["id"].(float64); ok && idFloat != 0 {
+                id := int(idFloat)
+                c.pendingMu.Lock()
+                ch, ok := c.pending[id]
+                if ok {
+                    delete(c.pending, id)
+                }
+                c.pendingMu.Unlock()
+                
+                if ok {
+                    // 将 map 转回 rpcResponse 结构体以保持现有逻辑兼容
+                    var msg rpcResponse
+                    msgBytes, _ := json.Marshal(rawMsg)
+                    json.Unmarshal(msgBytes, &msg)
+                    ch <- &msg
+                }
+            }
+        }
+    }()
 
-			if msg.ID != 0 {
-				c.pendingMu.Lock()
-				ch, ok := c.pending[msg.ID]
-				if ok {
-					delete(c.pending, msg.ID)
-				}
-				c.pendingMu.Unlock()
-				if ok {
-					ch <- &msg
-				}
-			}
-		}
-	}()
-
-	return nil
+    return nil
 }
 
 func (c *WSClient) IsConnected() bool {
@@ -246,7 +273,7 @@ func (c *WSClient) Report(metric *collector.Metric) ([]Task, error) {
 	return result.Tasks, nil
 }
 
-func (c *WSClient) SendTaskResult(taskID int, nodeID string, pingMs float64) {
+func (c *WSClient) SendTaskResult(taskID int, nodeID string, pingMs, loss, jitter, p50, p99, minMs, maxMs float64, status string) {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
@@ -261,7 +288,14 @@ func (c *WSClient) SendTaskResult(taskID int, nodeID string, pingMs float64) {
 		Params: map[string]interface{}{
 			"node_id": nodeID,
 			"task_id": taskID,
-			"ping_ms": pingMs,
+			"ping_ms": pingMs, // 可作为平均延迟
+			"loss":    loss,
+			"jitter":  jitter,
+			"p50":     p50,
+			"p99":     p99,
+			"min_ms":  minMs,
+			"max_ms":  maxMs,
+			"status":  status,
 		},
 		ID: id,
 	}
@@ -280,13 +314,13 @@ func (c *WSClient) ConnectWithRetry() {
 		}
 
 		if err := c.Connect(); err != nil {
-			log.Printf("[WS] 连接失败，%v 后重试: %v\n", backoff, err)
+			logger.Log.Error("Connection failed", zap.Error(err), zap.Duration("next_retry", backoff))
 		} else {
 			for c.IsConnected() {
 				time.Sleep(500 * time.Millisecond)
 			}
 			backoff = 2 * time.Second
-			log.Println("[WS] 准备重连...")
+			logger.Log.Debug("Preparing to reconnect...")
 			continue
 		}
 
@@ -304,4 +338,41 @@ func (c *WSClient) Stop() {
 		c.conn.Close()
 	}
 	c.connMu.Unlock()
+}
+
+// 🌟 新增：发起终端专用连接
+// 需要确保你已经在 internal/terminal 包中实现了 Start 方法
+// 并在 reporter.go 顶部 import 了 "Float-agent/internal/terminal"
+func (c *WSClient) connectTerminalWS(sessionID string) {
+	u, err := url.Parse(strings.TrimSuffix(c.serverURL, "/"))
+	if err != nil {
+		return
+	}
+	// 转换协议为 ws/wss
+	if u.Scheme == "https" {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	
+	// 设置终端专用路由
+	u.Path = "/agent/terminal/ws"
+	q := u.Query()
+	q.Set("token", c.token)
+	q.Set("session_id", sessionID)
+	u.RawQuery = q.Encode()
+
+	dialer := websocket.DefaultDialer
+	if c.insecure {
+		dialer = &websocket.Dialer{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+
+	termConn, _, err := dialer.Dial(u.String(), nil)
+    if err != nil {
+        logger.Log.Error("Terminal dial failed", zap.Error(err))
+        return
+}
+	terminal.Start(termConn)
 }

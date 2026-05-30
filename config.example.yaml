@@ -1,0 +1,5 @@
+interval: 5s
+disk_path: "/"
+server_url: "http://your-server-address:8080"
+node_id: "your-node-id"
+auth_token: "your-auth-token"

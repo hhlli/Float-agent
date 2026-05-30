@@ -17,7 +17,7 @@ import (
 	"github.com/shirou/gopsutil/v3/net"
 )
 
-const ProbeVersion = "v1.0.2"
+const ProbeVersion = "v1.0.0"
 
 type Metric struct {
 	Timestamp    int64  `json:"timestamp"`
@@ -59,6 +59,10 @@ type Metric struct {
 	Load1     float64 `json:"load_1"`
 	Load5     float64 `json:"load_5"`
 	Load15    float64 `json:"load_15"`
+	// 新增 Docker 字段
+	DockerContainers []DockerContainer `json:"docker_containers,omitempty"`
+	// 新增字段：标识探针是否允许远程控制
+	TerminalEnabled  bool        `json:"terminal_enabled"`
 }
 
 var (
@@ -193,7 +197,14 @@ func Collect(cfg *config.Config) (*Metric, error) {
 			}
 		}
 	}
-
+// === 重构后的 Docker 读取逻辑 (非阻塞) ===
+if cfg.DockerEndpoint != "" {
+	// 直接从内存缓存中读取，耗时接近 0ms
+	m.DockerContainers = GetCachedDockerStats()
+}
+// === 新增结束 ===
+// 🌟 在这里注入远程控制开关状态
+m.TerminalEnabled = cfg.EnableTerminal
 	return m, nil
 }
 

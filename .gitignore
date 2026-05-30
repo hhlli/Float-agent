@@ -1,0 +1,10 @@
+# 探针配置文件与节点标识（必须忽略）
+config.yaml
+.node_id
+
+# Go 编译产物
+/probe
+*.exe
+
+# 忽略 MacOS 系统文件
+**/.DS_Store

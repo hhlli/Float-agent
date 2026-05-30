@@ -21,6 +21,10 @@ type Config struct {
 	DisableRPC    bool   `yaml:"disable_rpc"`
 	NetInclude    string `yaml:"net_include"`
 	NetExclude    string `yaml:"net_exclude"`
+	DockerEndpoint string `yaml:"docker_endpoint"`
+	DockerStats   bool   `yaml:"docker_stats"` // 🌟 修复此处的标签
+	// 新增终端控制开关
+	EnableTerminal bool `yaml:"enable_terminal"`
 }
 
 func Load(path string) (*Config, error) {
