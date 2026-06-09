@@ -29,7 +29,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             OUTPUT_NAME+='.exe'
           fi
-          go build -o $OUTPUT_NAME ./cmd/probe/main.go
+          go build -ldflags="-s -w -X 'Float-agent/internal/collector.ProbeVersion=${{ github.ref_name }}'" -o $OUTPUT_NAME ./cmd/probe/main.go
           
       - name: Upload binaries to Release
         uses: softprops/action-gh-release@v1

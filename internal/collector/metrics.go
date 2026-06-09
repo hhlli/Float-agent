@@ -17,7 +17,7 @@ import (
 	"github.com/shirou/gopsutil/v3/net"
 )
 
-const ProbeVersion = "v1.0.0"
+var ProbeVersion = "dev"
 
 type Metric struct {
 	Timestamp    int64  `json:"timestamp"`
