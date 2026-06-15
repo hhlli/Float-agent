@@ -173,6 +173,13 @@ func (c *WSClient) Connect() error {
 							go c.connectTerminalWS(sessionID)
 						}
                     }
+				case "mtr.request":
+					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+						target, _ := params["target"].(string)
+						if target != "" {
+							go c.executeMTRAndReport(target) // 调用拆分到 mtr.go 的方法
+						}
+					}
                 }
                 continue // 处理完 Request 直接跳过
             }

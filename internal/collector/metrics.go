@@ -3,6 +3,7 @@ package collector
 import (
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 	stdnet "net"
@@ -63,6 +64,8 @@ type Metric struct {
 	DockerContainers []DockerContainer `json:"docker_containers,omitempty"`
 	// 新增字段：标识探针是否允许远程控制
 	TerminalEnabled  bool        `json:"terminal_enabled"`
+	// 🌟 新增字段：标识探针安装的拓展能力
+	Capabilities     []string    `json:"capabilities"`
 }
 
 var (
@@ -205,6 +208,17 @@ if cfg.DockerEndpoint != "" {
 // === 新增结束 ===
 // 🌟 在这里注入远程控制开关状态
 m.TerminalEnabled = cfg.EnableTerminal
+
+	// 🌟 新增：扫描本地拓展插件目录
+	m.Capabilities = []string{}
+	if _, err := os.Stat("./plugins/mtr-plugin"); err == nil {
+		m.Capabilities = append(m.Capabilities, "mtr")
+	}
+	// 兼容 Windows 环境的拓展名
+	if _, err := os.Stat("./plugins/mtr-plugin.exe"); err == nil {
+		m.Capabilities = append(m.Capabilities, "mtr")
+	}
+
 	return m, nil
 }
 

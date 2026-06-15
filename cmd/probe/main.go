@@ -47,6 +47,7 @@ var (
 	pingRegex    = regexp.MustCompile(`time=([\d.]+) ms`)
 	currentTasks []reporter.Task
 	tasksMu      sync.RWMutex
+	mtrLocks     sync.Map
 )
 
 // 🌟 新增：统计计算逻辑
@@ -190,14 +191,25 @@ func startMonitorWorker(ws *reporter.WSClient, nodeID string) {
 			}
 			if now%interval == 0 {
 				go func(task reporter.Task) {
-					// 设定单次任务发包数为 5 (可根据需要调整)
+					// 🌟 新增：拦截 MTR 任务分支
+					if strings.ToUpper(task.Type) == "MTR" {
+						if _, loaded := mtrLocks.LoadOrStore(task.Target, true); loaded {
+							return 
+						}
+						defer mtrLocks.Delete(task.Target) 
+						
+						if task.Interval < 60 {
+							task.Interval = 60
+						}
+						
+						return
+					}
+
 					packetCount := 5
 					latencies, total, status := executeTaskBatch(task, packetCount)
 					
-					// 计算全部指标
 					avg, loss, jitter, p50, p99, minMs, maxMs := CalculateMetrics(latencies, total)
 					
-					// 调用上一步你在 reporter.go 中修改过的方法
 					ws.SendTaskResult(task.ID, nodeID, avg, loss, jitter, p50, p99, minMs, maxMs, status)
 				}(t)
 			}
