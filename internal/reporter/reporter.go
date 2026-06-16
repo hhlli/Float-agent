@@ -177,11 +177,19 @@ func (c *WSClient) Connect() error {
 					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
 						target, _ := params["target"].(string)
 						if target != "" {
-							go c.executeMTRAndReport(target) // 调用拆分到 mtr.go 的方法
+							go c.executeMTRAndReport(target) 
 						}
 					}
-                }
-                continue // 处理完 Request 直接跳过
+				case "extension.install":
+					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+						extID, _ := params["id"].(string)
+						if extID != "" {
+							// 异步执行真实的插件静默下载与部署，防止阻塞 WS 主接收循环
+							go c.handleExtensionInstallation(extID) 
+						}
+					}
+				}
+				continue
             }
 
             // B. 处理服务端返回的响应 (Response，对应 Agent 发出的 report 等)
