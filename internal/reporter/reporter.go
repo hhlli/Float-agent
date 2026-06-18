@@ -184,8 +184,15 @@ func (c *WSClient) Connect() error {
 					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
 						extID, _ := params["id"].(string)
 						if extID != "" {
-							// 异步执行真实的插件静默下载与部署，防止阻塞 WS 主接收循环
-							go c.handleExtensionInstallation(extID) 
+							go c.handleExtensionInstallation(extID)
+						}
+					}
+				
+				case "extension.uninstall":
+					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+						extID, _ := params["id"].(string)
+						if extID != "" {
+							go c.handleExtensionUninstallation(extID)
 						}
 					}
 				}

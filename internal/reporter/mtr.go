@@ -1,59 +1,117 @@
 package reporter
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"Float-agent/internal/logger"
 	"go.uber.org/zap"
 )
 
-const mtrExecutionTimeout = 45 * time.Second
+const mtrExecutionTimeout = 60 * time.Second
 
 // executeMTRAndReport 独立执行 MTR 插件并上报结果
 func (c *WSClient) executeMTRAndReport(target string) {
-	pluginPath := "./plugins/mtr-plugin"
-	if runtime.GOOS == "windows" {
-		pluginPath = "./plugins/mtr-plugin.exe"
-	}
+	// 开启异步协程，防止阻塞 WebSocket 导致心跳超时断连
+	go func(target string) {
+		pluginPath := "./plugins/mtr-plugin"
+		if runtime.GOOS == "windows" {
+			pluginPath = "./plugins/mtr-plugin.exe"
+		}
 
-	var resultData json.RawMessage
-	params := map[string]interface{}{
+		var resultData json.RawMessage
+
+		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+			resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":"MTR 插件未安装"}`, target))
+			c.reportMTRResultViaHTTP(target, resultData)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), mtrExecutionTimeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, pluginPath, "-target", target)
+		output, err := cmd.Output()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":"插件执行超时，子进程已被强制回收"}`, target))
+		} else if err != nil {
+			if len(output) > 0 && json.Valid(output) {
+				resultData = json.RawMessage(output)
+			} else {
+				safeErr, _ := json.Marshal(fmt.Sprintf("执行失败: %v | 详情: %s", err, string(output)))
+				resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":%s}`, target, string(safeErr)))
+			}
+		} else {
+			if len(output) > 0 && json.Valid(output) {
+				resultData = json.RawMessage(output)
+			} else {
+				safeOutput, _ := json.Marshal(string(output))
+				resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":%s}`, target, string(safeOutput)))
+			}
+		}
+
+		c.reportMTRResultViaHTTP(target, resultData)
+	}(target)
+}
+
+// 独立 HTTP 上报方法
+func (c *WSClient) reportMTRResultViaHTTP(target string, resultData json.RawMessage) {
+	payload := map[string]interface{}{
+		"node_id":   c.nodeID,
 		"target":    target,
 		"timestamp": time.Now().Unix(),
+		"result":    resultData,
 	}
+	body, _ := json.Marshal(payload)
 
-	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
-		resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":"MTR 插件未安装"}`, target))
-		params["result"] = resultData
-		c.send("mtr.report", params)
+	// 拼接服务端 HTTP 接收接口
+	apiEndpoint := strings.TrimRight(c.serverURL, "/") + "/api/agent/mtr/report"
+
+	req, err := http.NewRequest("POST", apiEndpoint, bytes.NewBuffer(body))
+	if err != nil {
+		logger.Log.Error("构建 MTR 上报请求失败", zap.Error(err))
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), mtrExecutionTimeout)
-	defer cancel()
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
 
-	cmd := exec.CommandContext(ctx, pluginPath, "-target", target)
-	output, err := cmd.Output()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":"插件执行超时，子进程已被强制回收"}`, target))
-	} else if err != nil {
-		resultData = json.RawMessage(fmt.Sprintf(`{"target":"%s","error":"插件执行失败: %s"}`, target, err.Error()))
-	} else {
-		resultData = json.RawMessage(output)
+	// 如果探针配置了忽略证书，HTTP 客户端同步保持忽略
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if c.insecure {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
-	params["result"] = resultData
-	c.send("mtr.report", params)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Log.Error("MTR 结果 HTTP 上报失败", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Log.Error("MTR 上报被服务端拒绝", zap.Int("status", resp.StatusCode))
+	} else {
+		logger.Log.Info("MTR 结果 HTTP 上报成功", zap.String("target", target))
+	}
 }
 
 // handleExtensionInstallation 负责探针端插件的自动化生命周期部署
@@ -90,7 +148,16 @@ func (c *WSClient) handleExtensionInstallation(extID string) {
 		}
 	}
 
-	resp, err := http.Get(downloadURL)
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: 30 * time.Second,
+			}).DialContext,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+		// 不设 Timeout，让 body 下载不受总时限约束
+	}
+	resp, err := httpClient.Get(downloadURL)
 	if err != nil {
 		logger.Log.Error("下载请求失败", zap.Error(err))
 		return
@@ -133,4 +200,28 @@ func (c *WSClient) handleExtensionInstallation(extID string) {
 	}
 
 	logger.Log.Info("插件部署完成", zap.String("path", pluginPath))
+}
+
+// handleExtensionUninstallation 负责探针端插件的卸载清理
+func (c *WSClient) handleExtensionUninstallation(extID string) {
+	if extID != "mtr-plugin" {
+		return
+	}
+
+	pluginPath := "./plugins/mtr-plugin"
+	if runtime.GOOS == "windows" {
+		pluginPath = "./plugins/mtr-plugin.exe"
+	}
+
+	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+		logger.Log.Info("插件文件不存在，无需卸载", zap.String("ext_id", extID))
+		return
+	}
+
+	if err := os.Remove(pluginPath); err != nil {
+		logger.Log.Error("卸载插件失败", zap.String("ext_id", extID), zap.Error(err))
+		return
+	}
+
+	logger.Log.Info("插件已卸载", zap.String("ext_id", extID), zap.String("path", pluginPath))
 }
