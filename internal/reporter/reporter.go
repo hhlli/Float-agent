@@ -165,40 +165,67 @@ func (c *WSClient) Connect() error {
                         }
                     }
                 case "terminal.request":
-                    // 🌟 新增：处理远程控制请求
+                    // 处理远程控制请求
                     if params, ok := rawMsg["params"].(map[string]interface{}); ok {
                         sessionID, _ := params["session_id"].(string)
                         if sessionID != "" {
-							logger.Log.Info("Terminal session requested", zap.String("session_id", sessionID))
-							go c.connectTerminalWS(sessionID)
-						}
+                            logger.Log.Info("Terminal session requested", zap.String("session_id", sessionID))
+                            go c.connectTerminalWS(sessionID)
+                        }
                     }
-				case "mtr.request":
-					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
-						target, _ := params["target"].(string)
-						if target != "" {
-							go c.executeMTRAndReport(target) 
-						}
-					}
-				case "extension.install":
-					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
-						extID, _ := params["id"].(string)
-						if extID != "" {
-							go c.handleExtensionInstallation(extID)
-						}
-					}
-				
-				case "extension.uninstall":
-					if params, ok := rawMsg["params"].(map[string]interface{}); ok {
-						extID, _ := params["id"].(string)
-						if extID != "" {
-							go c.handleExtensionUninstallation(extID)
-						}
-					}
-				}
-				continue
-            }
+                case "plugin.execute": 
+                    // 拦截通用执行指令
+                    if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+                        extID, _ := params["ext_id"].(string)
+                        
+                        // 解析动态参数数组
+                        var args []string
+                        if rawArgs, ok := params["args"].([]interface{}); ok {
+                            for _, a := range rawArgs {
+                                args = append(args, fmt.Sprintf("%v", a))
+                            }
+                        }
 
+                        var taskID int64
+                        if idFloat, hasID := rawMsg["id"].(float64); hasID {
+                            taskID = int64(idFloat)
+                        }
+
+                        if extID != "" {
+                            go c.executePluginAndReport(taskID, extID, args) 
+                        }
+                    }
+                case "extension.install":
+                    if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+                        extID, _ := params["id"].(string)
+                        downloadURL, _ := params["download_url"].(string)
+                        requirePrivilege, _ := params["require_privilege"].(bool)
+                        
+                        var taskID int64
+                        if idFloat, hasID := rawMsg["id"].(float64); hasID {
+                            taskID = int64(idFloat)
+                        }
+                        
+                        // 参数齐全才进行下发
+                        if extID != "" && downloadURL != "" {
+                            go c.handleExtensionInstallation(taskID, extID, downloadURL, requirePrivilege)
+                        }
+                    }
+                case "extension.uninstall":
+                    if params, ok := rawMsg["params"].(map[string]interface{}); ok {
+                        extID, _ := params["id"].(string)
+                        var taskID int64
+                        if idFloat, hasID := rawMsg["id"].(float64); hasID {
+                            taskID = int64(idFloat)
+                        }
+                        if extID != "" {
+                            go c.handleExtensionUninstallation(taskID, extID)
+                        }
+                    }
+                } // 🌟 修复：补全 switch 的右括号
+                
+                continue
+            }
             // B. 处理服务端返回的响应 (Response，对应 Agent 发出的 report 等)
             // JSON 数字在 map 中默认是 float64
             if idFloat, ok := rawMsg["id"].(float64); ok && idFloat != 0 {
@@ -395,6 +422,6 @@ func (c *WSClient) connectTerminalWS(sessionID string) {
     if err != nil {
         logger.Log.Error("Terminal dial failed", zap.Error(err))
         return
-}
+    }
 	terminal.Start(termConn)
 }
