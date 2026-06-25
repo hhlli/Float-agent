@@ -107,7 +107,7 @@ func (c *WSClient) handleExtensionInstallation(taskID int64, extID, downloadURL 
 	pluginPath := filepath.Join(pluginDir, fileName)
 	tmpPath := pluginPath + ".tmp"
 
-	// 动态拼接带有操作系统和架构的真实下载地址
+    // 动态拼接带有操作系统和架构的真实下载地址
 	finalDownloadURL := fmt.Sprintf("%s-%s-%s", downloadURL, runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "windows" {
 		finalDownloadURL += ".exe"
@@ -202,6 +202,10 @@ func (c *WSClient) handleExtensionUninstallation(taskID int64, extID string) {
 		c.sendExtensionResponseWS(taskID, "uninstall", extID, fmt.Errorf("删除文件失败: %v", err))
 		return
 	}
+	pluginDir := filepath.Dir(pluginPath)
+if entries, err := os.ReadDir(pluginDir); err == nil && len(entries) == 0 {
+    os.Remove(pluginDir) // 仅当目录为空时才会删除成功
+}
 
 	logger.Log.Info("插件已卸载", zap.String("ext_id", extID), zap.String("path", pluginPath))
 	c.sendExtensionResponseWS(taskID, "uninstall", extID, nil)
